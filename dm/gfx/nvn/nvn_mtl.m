@@ -13641,7 +13641,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_mtk.on) { mtk_encode(en); return; }
     if (g_geo_mesh.on) { geo_mesh_encode(en); return; }
     if (g_geo_program) {
-        if (g_tess_count) { enc_r_draw_instanced(en, mp, 0, g_tess_count, 1, (uint32_t)g_draw_binst); return; }   // nvn_tess.inc: N x N cells per patch, non-indexed
+        if (g_tess_ind) { enc_r_draw_indirect(en, mp, g_tess_ind); return; }   // nvn_tess.inc adaptive: the expansion kernel's cell count
+        if (g_tess_count) { enc_r_draw_instanced(en, mp, 0, g_tess_count, 1, (uint32_t)g_draw_binst); return; }   // nvn_tess.inc fixed grid: N x N cells per patch, non-indexed
         if (g_geo_count) enc_r_draw_indexed(en, mp, g_geo_count, MTLIndexTypeUInt32, g_geo_indices, g_geo_index_bytes, 1, 0, (uint32_t)g_draw_binst);   // geo_lean_tri's slots
         else enc_r_draw_indexed_indirect(en, mp, MTLIndexTypeUInt32, g_geo_indices, g_geo_index_bytes, g_geo_args);
         return;
