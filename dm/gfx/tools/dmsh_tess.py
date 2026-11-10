@@ -174,6 +174,13 @@ def _words(ty, n, base):
     return f'as_type<{t}>({vec}({ws}))' if ty != 'uint' else f'{vec}({ws})'
 
 
+def _as_float4(ty, n, e):
+    """An attribute of 1 to 4 components as the float4 a location slot holds (its bits kept)"""
+    k = int(n or 1)
+    v = e if ty == 'float' else f'as_type<float{n}>({e})'
+    return v if k == 4 else f'float4({v}{", 0.0" * (4 - k)})'
+
+
 def hull(src, spv):
     """Rewrite a SPIRV-Cross tessellation-control kernel. -> (source, facts)"""
     io = spirv_io(spv)
@@ -186,7 +193,7 @@ def hull(src, spv):
     m, lines = _struct(src, 'main0_in')
     if not m:
         raise ValueError('tessellation: hull without main0_in')
-    loads, plain, in_bytes = [], [], 0
+    loads, plain, in_bytes, thru = [], [], 0, []
     for ln in lines:
         v = _MEMBER.match(ln)
         if not v or not v.group(4) or not v.group(4).startswith('attribute('):
@@ -200,6 +207,7 @@ def hull(src, spv):
                 raise ValueError(f'tessellation: hull input {mem} attribute is not its location')
             base = 16 + 4 * loc
         loads.append(f'in.{mem} = {_words(ty, n, base)};')
+        thru.append((ty, n, mem, CP_SLOTS - 1 if mem == 'gl_Position' else loc))
         plain.append(f'    {ty}{n} {mem};')
         in_bytes += 16
     src = src[:m.start()] + 'struct main0_in\n{\n' + '\n'.join(plain) + '\n};\n\n' + (
@@ -231,11 +239,20 @@ def hull(src, spv):
            '    if (gl_InvocationID < spvIndirectParams[0])\n    {\n'
            '        device const uint* dm_r = dm_tcap + ulong(dm_tidx[gl_PrimitiveID * spvIndirectParams[0] + gl_InvocationID]) * '
            f'{CAPTURE_WORDS}u;\n' + ''.join(f'        {x}\n' for x in loads) + '    }\n')
+    # A hull that writes no output control point: Maxwell code that stores them through physical attribute addresses (AL2P / ASTP) is translated as stores to global
+    # memory that reach nothing (Mario Golf: Super Rush's grass, whose domain shader blends the four corners' positions and got zeros). Each output control point then
+    # takes the input control point's attributes, by location, so a pass-through hull passes through; a hull that writes any of them itself is left alone.
+    passthrough = not re.search(r'\bgl_out\[[^\]]*\]\.\w+(\[[^\]]*\])?\s*=[^=]', src[body.end():])
+    if passthrough and thru:
+        pro += (f'    if (gl_InvocationID < spvIndirectParams[0] && gl_InvocationID < {int(out_cp.group(1))}u)\n    {{\n'
+                f'        device float4* dm_o = (device float4*)spvOut + ulong(gl_PrimitiveID * {int(out_cp.group(1))}u + gl_InvocationID) * {CP_SLOTS}u;\n'
+                + ''.join(f'        dm_o[{slot}] = {_as_float4(ty, n, "in." + mem)};\n' for ty, n, mem, slot in thru)
+                + '    }\n')
     src = src[:body.end()] + pro + src[body.end():]
     src, n_reads = re.subn(r'\bgl_in\[(_\d+)\]', r'dm_gin(gl_in, \1, spvIndirectParams[0])', src)
     if 'gl_in[gl_InvocationID] = in;' not in src:
         raise ValueError('tessellation: hull without its control point store')
-    return src, {'out_cp': int(out_cp.group(1)), 'in_bytes': in_bytes, 'cp_slots': CP_SLOTS, 'patch_slots': PATCH_SLOTS}
+    return src, {'out_cp': int(out_cp.group(1)), 'in_bytes': in_bytes, 'cp_slots': CP_SLOTS, 'patch_slots': PATCH_SLOTS, **({'passthrough': True} if passthrough and thru else {})}
 
 
 def domain(src, spv, mode):

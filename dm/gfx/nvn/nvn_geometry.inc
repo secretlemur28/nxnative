@@ -961,6 +961,20 @@ static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_jo
                           (uint32_t)first, first_instance, (uint32_t)(packed_size / 4), (uint32_t)first};
     memcpy(plean_job, &lj, sizeof lj);
     j->lean = lean != nil; j->capture_words = record;
+    if (j->tess_buf) {   // DM_NVN_TESS_PEEK=1: diagnostic, what the domain shader's capture and the pack wrote for this job, read back a little later
+        static int peek = -1, left = 8; if (peek < 0) { const char *e = getenv("DM_NVN_TESS_PEEK"); peek = e && atoi(e); }
+        if (peek && left > 0) { left--;
+            const uint32_t *in = pinput, *ar = pargs, *cn = pcnt; uint32_t rec = MAX(record, 1u), nv = (uint32_t)cspan, g = (uint32_t)groups, em = (uint32_t)emits; id<MTLBuffer> keep = scratch;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ (void)keep;
+                const float *f = (const float *)in; uint32_t nzv = 0; for (uint32_t v = 0; v < nv; v++) if (in[(size_t)v * rec] | in[(size_t)v * rec + 1] | in[(size_t)v * rec + 2]) nzv++;
+                uint64_t sum = 0; for (uint32_t i = 0; i < g; i++) sum += cn[i];
+                uint32_t culled = 0, live = UINT32_MAX; for (uint32_t v = 0; v < nv; v++) { const float *q = f + (size_t)v * rec; if (q[0] == 2.0f && q[1] == 0.0f && q[2] == 0.0f) culled++; else if (live == UINT32_MAX) live = v - v % 3; }
+                if (live != UINT32_MAX) { const float *q = f + (size_t)live * rec; MLOG("tess peek geometry: %u vertices of culled patches; first live triangle at vertex %u: %g %g %g %g | %g %g %g %g | %g %g %g %g", culled, live, q[0], q[1], q[2], q[3], q[rec], q[rec + 1], q[rec + 2], q[rec + 3], q[2 * rec], q[2 * rec + 1], q[2 * rec + 2], q[2 * rec + 3]); }
+                MLOG("tess peek geometry: %u captured vertices of %u words, %u with a position other than 0; vertex 0 %g %g %g %g, 1 %g %g %g %g, 2 %g %g %g %g; %u groups emitting up to %u, counts sum %llu; draw arguments %u %u %u %u %u",
+                    nv, rec, nzv, f[0], f[1], f[2], f[3], f[rec], f[rec + 1], f[rec + 2], f[rec + 3], f[2 * rec], f[2 * rec + 1], f[2 * rec + 2], f[2 * rec + 3], g, em, (unsigned long long)sum, ar[0], ar[1], ar[2], ar[3], ar[4]);
+            });
+        }
+    }
     j->direct_count = lean && topology == 3 ? (uint32_t)(np * 3) : 0;
     j->gs = gs; j->reader = lean ? vs : reader; j->capture = capture; j->dw.instances = instances; j->di.instances = instances;
     j->vertex_range = (p_draw){.first = (int32_t)first, .count = (int32_t)span, .instances = instances, .base_instance = (int32_t)first_instance};

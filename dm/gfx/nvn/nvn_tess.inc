@@ -125,6 +125,7 @@ static void tess_refuse(NvProg *pr, const p_draw *dw, const p_draw_idx *di, cons
 }
 static void tess_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     NvShader *vs = pr->sh[0], *hs = pr->sh[3], *ds = pr->sh[4];
+    { const char *off = getenv("DM_NVN_TESS_OFF"); if (off && atoi(off)) return; }   // diagnostic, read at every draw (DM_CTL env): A/B a scene with and without its tessellated draws
     int count = dw ? dw->count : di->count, instances = dw ? dw->instances : di->instances, ps = S.patch_size;
     if (!vs || !vs->geo_fn) { tess_refuse(pr, dw, di, "no vertex capture entry"); return; }
     if (!hs || !hs->tess_ok || !ds || !ds->tess_ok) { tess_refuse(pr, dw, di, "hull or domain not rewritten for replay (dmsh_tess.py)"); return; }
@@ -240,6 +241,8 @@ static void tess_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
             const uint8_t *cap = (const uint8_t *)b_cap.contents + o_cap + 512, *out = (const uint8_t *)b_out.contents + o_out; uint64_t lo_ = lev_off; uint32_t np_ = np, K_ = K; id<MTLBuffer> keep1 = b_cap, keep2 = b_out;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ (void)keep1; (void)keep2;
                 const float *c = (const float *)cap; const _Float16 *L = (const _Float16 *)(out + lo_);
+                { double mx = 0; uint32_t nz = 0; for (uint32_t q = 0; q < np_; q++) { double l = (double)L[q * 6]; if (l > 0) nz++; if (l > mx) mx = l; }
+                  MLOG("tess peek: %u of %u patches have a level above 0, the highest %g", nz, np_, mx); }
                 MLOG("tess peek: %u patches; captured vertex 0 position %g %g %g %g, vertex 1 %g %g %g %g", np_, c[0], c[1], c[2], c[3], c[144], c[145], c[146], c[147]);
                 for (uint32_t q = 0; q < np_ && q < 3; q++) { const float *cp = (const float *)(out + (uint64_t)q * K_ * 33 * 16);
                     MLOG("tess peek: patch %u levels %g %g %g %g | %g %g; control point 0 position %g %g %g %g, 1 %g %g %g %g, 2 %g %g %g %g", q, (double)L[q * 6], (double)L[q * 6 + 1], (double)L[q * 6 + 2], (double)L[q * 6 + 3], (double)L[q * 6 + 4], (double)L[q * 6 + 5],
