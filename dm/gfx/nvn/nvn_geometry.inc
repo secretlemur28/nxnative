@@ -5,6 +5,7 @@ static uint64_t g_geo_indices, g_geo_index_bytes, g_geo_args;
 static const p_draw *g_geo_vrange;
 static uint32_t g_geo_count;
 static uint64_t g_geo_hoisted, g_geo_hoist_runs;
+static uint64_t g_tess_buf, g_tess_info;   // nvn_tess.inc: set while a tessellated draw's domain stage is drawn or captured
 static int geo_hoist_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_NVN_GEO_HOIST"); on = !e || strcmp(e, "0"); } return on; }
 static id<MTLComputePipelineState> g_geo_lean_k[3];
 static void draw(const p_draw *dw, const p_draw_idx *di);
@@ -733,6 +734,7 @@ typedef struct {
     uint64_t lean_job;
     uint32_t capture_words, direct_count;
     int lean;
+    uint64_t tess_buf, tess_info;   // the vertex stage is a domain shader (nvn_tess.inc): the hull's outputs and the grid's facts it reads
 } geo_job;
 enum { GEO_RUN = 64 };
 static geo_job g_geo_run[GEO_RUN];
@@ -786,6 +788,7 @@ static int geo_query_run(void) {
 static int geo_prep(NvProg *pr, const p_draw *dw0, const p_draw_idx *di0, geo_job *j, int may_wait, uint32_t primitive_base) {
     *j = (geo_job){.pr = pr, .vs = pr ? pr->sh[0] : nil, .gs = pr ? pr->sh[2] : nil,
                    .dw = dw0 ? *dw0 : (p_draw){0}, .di = di0 ? *di0 : (p_draw_idx){0}, .has_di = di0 != NULL};
+    if (j->vs && j->vs->stage == 4) { j->tess_buf = g_tess_buf; j->tess_info = g_tess_info; }   // not a draw hoisted into this one's run
     NvShader *vs = j->vs, *base = j->gs;
     if (!vs || !vs->geo_fn || !base || !base->geo_vertices || pr->sh[3] || pr->sh[4]) {
         if (!may_wait) return -1;
@@ -980,7 +983,8 @@ static void geo_capture_one(id<MTL4RenderCommandEncoder> re, const geo_job *j) {
         if (bad >= 0) RED_ONCE(160, "vertex stream %d's buffer %#llx is in no memory pool; a geometry capture reads the buffer bound before", bad, (unsigned long long)S.vbuf[bad].address);
     }
     vconv_bind(re, j->vs, 1, &j->vertex_range, NULL);
-    args_dirty_all(); encode_args(re, j->vs, 0, 1); enc_r_vbuf(re, 13, j->capture_info);
+    args_dirty_all(); encode_args(re, j->vs, j->vs->stage == 4 ? 4 : 0, 1); enc_r_vbuf(re, 13, j->capture_info);
+    if (j->tess_buf) { enc_r_vbuf(re, 14, j->tess_buf); enc_r_vbuf(re, 15, j->tess_info); }   // a domain shader's capture: the hull's outputs (nvn_tess.inc)
     if (j->nruns) for (size_t r = 0; r < j->nruns; r++) {
         if (r) enc_r_vbuf(re, 13, j->capture_info + r * sizeof(nvn_geo_capture));
         enc_r_draw_indexed(re, MTLPrimitiveTypePoint, j->runs[2 * r + 1], MTLIndexTypeUInt32, j->capture_ix + (uint64_t)j->runs[2 * r] * 4, (j->nu - j->runs[2 * r]) * 4, j->di.instances, j->di.base_vertex, j->first_instance);

@@ -20,7 +20,6 @@
 // with a [RED] line, as before.
 static id<MTL4ComputeCommandEncoder> dispatch_enc(void);
 enum { TESS_CP_SLOTS = 33, TESS_PATCH_SLOTS = 32 };   // dmsh_tess.py CP_SLOTS / PATCH_SLOTS
-static uint64_t g_tess_buf, g_tess_info;
 static uint32_t g_tess_count;
 static uint64_t g_tess_draws, g_tess_patches, g_tess_refused;
 static uint64_t g_tess_ind;   // adaptive draw: GPU address of its MTLDrawPrimitivesIndirectArguments (vertex count written by the expansion kernel)
@@ -114,6 +113,9 @@ static int tess_level(void) {   // 0: adaptive (default); DM_NVN_TESS_LEVEL=N: t
     if (n < 0) { const char *e = getenv("DM_NVN_TESS_LEVEL"); n = e ? atoi(e) : 0; n = !e ? 0 : n < 2 ? 2 : n > 64 ? 64 : n & ~1; }
     return n;
 }
+static int tess_geo_level(void) {   // DM_NVN_TESS_GEO_LEVEL: the grid of a patch whose triangles go on to a geometry shader (even, 2..64; default 8)
+    static int n = 0; if (!n) { const char *e = getenv("DM_NVN_TESS_GEO_LEVEL"); n = e ? atoi(e) : 8; n = n < 2 ? 2 : n > 64 ? 64 : n & ~1; } return n;
+}
 static void tess_refuse(NvProg *pr, const p_draw *dw, const p_draw_idx *di, const char *why) {
     g_tess_refused++;
     static int n; if (n++ < 8) MLOG("[RED] tessellated draw not replayed (vertex %s hull %s domain %s fragment %s; patch size %d, count %d, instances %d, indexed %d): %s",
@@ -129,10 +131,30 @@ static void tess_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     static const char *only; static int only_read;   // DM_NVN_TESS_ONLY=<hull key>,...: diagnostic, replay only those programs (to tell their effects apart)
     if (!only_read) { only = getenv("DM_NVN_TESS_ONLY"); only_read = 1; }
     if (only && !strstr(only, [[NSString stringWithUTF8String:hs->key] substringToIndex:MIN((NSUInteger)16, strlen(hs->key))].UTF8String)) { tess_refuse(pr, dw, di, "not in DM_NVN_TESS_ONLY"); return; }
-    if (dw ? dw->ind || dw->mdi_cnt : di->ind || di->mdi_cnt) { tess_refuse(pr, dw, di, "indirect"); return; }
+    if (dw ? dw->mdi_cnt : di->mdi_cnt) { tess_refuse(pr, dw, di, "multi-draw indirect"); return; }
+    p_draw dwl; p_draw_idx dil;   // an indirect draw's arguments, read as nvn_geometry.inc geo_prep reads them (after the GPU work that may write them)
+    uint64_t ind = dw ? dw->ind : di->ind;
+    if (ind) {
+        uint32_t a[5] = {0}; size_t n = dw ? 16 : 20; int drained = 0;
+        if (defer_has_active()) defer_fallback();
+        lc_land(); rp_flush(); rp_end(); ubd_land();
+        if (geo_cpu_hazard(ind, n) && !geo_sync_cpu(&drained)) { tess_refuse(pr, dw, di, "indirect arguments not settled"); return; }
+        if (!nvn_host_readable(ind, n)) { tess_refuse(pr, dw, di, "indirect arguments not readable"); return; }
+        memcpy(a, (void *)(uintptr_t)ind, n);
+        if (!a[0] || !a[1]) return;   // nothing to draw
+        if (a[0] > INT32_MAX || a[1] > INT32_MAX) { tess_refuse(pr, dw, di, "indirect count"); return; }
+        if (dw) { dwl = *dw; dwl.count = (int32_t)a[0]; dwl.instances = (int32_t)a[1]; dwl.first = (int32_t)a[2]; dwl.base_instance = (int32_t)a[3]; dwl.ind = 0; dw = &dwl; }
+        else { dil = *di; dil.count = (int32_t)a[0]; dil.instances = (int32_t)a[1]; dil.ibuf += (uint64_t)a[2] << dil.itype; dil.base_vertex = (int32_t)a[3]; dil.base_instance = (int32_t)a[4]; dil.ind = 0; di = &dil; }
+        count = dw ? dw->count : di->count; instances = dw ? dw->instances : di->instances;
+    }
     if (instances < 1) { tess_refuse(pr, dw, di, "no instances"); return; }
     if (ps < 1 || ps > 32 || count < ps) { tess_refuse(pr, dw, di, "patch size"); return; }
     uint32_t np1 = (uint32_t)(count / ps), ncp = np1 * (uint32_t)ps, ni = (uint32_t)instances, np = np1 * ni, K = hs->tess_out_cp, N = (uint32_t)tess_level();
+    // A geometry shader after the domain: its kernel takes a vertex count the CPU knows (geo_prep sizes its output from it), which the adaptive list's is not, so
+    // every patch is the fixed grid (DM_NVN_TESS_GEO_LEVEL, default 8; DM_NVN_TESS_LEVEL when set)
+    NvShader *gs = pr->sh[2] && pr->sh[2]->geo_vertices ? pr->sh[2] : nil;
+    if (gs && !N) N = (uint32_t)tess_geo_level();
+    if (gs && (gs->geo_vertices != 3 || !ds->geo_fn)) { tess_refuse(pr, dw, di, gs->geo_vertices != 3 ? "the geometry shader after the domain does not take triangles" : "the domain shader has no capture entry"); return; }
     int adapt = N == 0;
     if (adapt && !g_tess_kpso && !g_tess_kfail) {
         NSError *e = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(k_tess_msl) options:nil error:&e];
@@ -212,8 +234,32 @@ static void tess_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
         args_dirty_all();
     }
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }   // the draw's render pass follows; its full barrier orders it after the kernel
+    {   // DM_NVN_TESS_PEEK=1: diagnostic, what the vertex capture and the hull wrote for the first patches, read back a little later (the arena may hold a later draw's by then)
+        static int peek = -1, left = 6; if (peek < 0) { const char *e = getenv("DM_NVN_TESS_PEEK"); peek = e && atoi(e); }
+        if (peek && left > 0) { left--;
+            const uint8_t *cap = (const uint8_t *)b_cap.contents + o_cap + 512, *out = (const uint8_t *)b_out.contents + o_out; uint64_t lo_ = lev_off; uint32_t np_ = np, K_ = K; id<MTLBuffer> keep1 = b_cap, keep2 = b_out;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ (void)keep1; (void)keep2;
+                const float *c = (const float *)cap; const _Float16 *L = (const _Float16 *)(out + lo_);
+                MLOG("tess peek: %u patches; captured vertex 0 position %g %g %g %g, vertex 1 %g %g %g %g", np_, c[0], c[1], c[2], c[3], c[144], c[145], c[146], c[147]);
+                for (uint32_t q = 0; q < np_ && q < 3; q++) { const float *cp = (const float *)(out + (uint64_t)q * K_ * 33 * 16);
+                    MLOG("tess peek: patch %u levels %g %g %g %g | %g %g; control point 0 position %g %g %g %g, 1 %g %g %g %g, 2 %g %g %g %g", q, (double)L[q * 6], (double)L[q * 6 + 1], (double)L[q * 6 + 2], (double)L[q * 6 + 3], (double)L[q * 6 + 4], (double)L[q * 6 + 5],
+                        cp[32 * 4], cp[32 * 4 + 1], cp[32 * 4 + 2], cp[32 * 4 + 3], cp[(33 + 32) * 4], cp[(33 + 32) * 4 + 1], cp[(33 + 32) * 4 + 2], cp[(33 + 32) * 4 + 3], cp[(66 + 32) * 4], cp[(66 + 32) * 4 + 1], cp[(66 + 32) * 4 + 2], cp[(66 + 32) * 4 + 3]); }
+            });
+        }
+    }
     swrite_note(pr); g_wr_epoch++; g_mdx_epoch++;
     if (tess_stages() < 3) { g_tess_draws++; return; }
+    if (gs) {   // 3'. the domain shader's capture entry as the vertex stage of the geometry path: its triangles are the geometry kernel's input (grass blades grown from a tessellated quad)
+        NvProg *gp = pr->tess_raster;
+        if (!gp || gp->sh[0] != ds || gp->sh[1] != pr->sh[1] || gp->sh[2] != gs) { gp = [NvProg new]; gp->sh[0] = ds; gp->sh[1] = pr->sh[1]; gp->sh[2] = gs; pr->tess_raster = gp; }
+        g_tess_buf = g_out; g_tess_info = g_par + 16; args_dirty_all();
+        p_draw tris = {.prim = 4, .first = 0, .count = (int32_t)(np * 6 * N * N), .instances = 1, .base_instance = (int32_t)binst};
+        geo_draw(gp, &tris, NULL, 0);
+        g_tess_buf = g_tess_info = 0; args_dirty_all();
+        g_tess_draws++; g_tess_patches += np;
+        static int once; if (once++ < 4) MLOG("tessellation: vertex %s hull %s domain %s geometry %s, %u patches of %d control points (%u out), fixed grid %u, %u triangles to the geometry stage", vs->key, hs->key, ds->key, gs->key, np, ps, K, N, np * 2 * N * N);
+        return;
+    }
     // 3. the domain shader as the vertex stage of an ordinary draw
     NvProg *raster = pr->tess_raster;
     if (!raster || raster->sh[0] != ds || raster->sh[1] != pr->sh[1]) { raster = [NvProg new]; raster->sh[0] = ds; raster->sh[1] = pr->sh[1]; pr->tess_raster = raster; }
