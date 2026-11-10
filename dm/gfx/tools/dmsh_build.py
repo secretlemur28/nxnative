@@ -804,6 +804,8 @@ def finish(key, w, j, c1):
     if j['stage'] == 'ds' and tess and 'unsupported' not in tess:   # the domain is the last stage before the rasterizer: the two depth-convention entry points (see vs_depth)
         try: capture = dmsh_geometry.capture(src)   # its triangles can go on to a geometry shader, as a vertex shader's vertices do (nvn_tess.inc)
         except ValueError: capture = ''
+        # a culled patch's vertices: outside the clip volume for the rasterizer, and for a geometry shader, which takes them in the domain's own space, too far away to be anything
+        capture = capture.replace('float4(2.0, 0.0, 0.0, 1.0)', 'float4(1.0e30, 1.0e30, 1.0e30, 1.0)')
         src, full = dmsh_entry.vs_depth(src); open(msl, 'w').write(full + capture)
     fu, fmask = dmsh_entry.fs_uint(src) if j['stage'] == 'ps' else (None, 0)   # the integer-output entry points (see fs_uint); the analysis below uses the source with only main0
     fd = dmsh_entry.fs_dual(src) if j['stage'] == 'ps' and key in DUAL_WANT else None   # the dual-source entry point (see fs_dual), from the source with only main0

@@ -324,7 +324,7 @@ def domain(src, spv, mode):
     # TESS_MSL dm_tvert), written by the host's expansion kernel; fixed: N x N cells per patch in vertex_id order
     # (DM_NVN_TESS_LEVEL).
     pro = ['    uint dm_n = dm_tinfo[0].x, dm_ncp = dm_tinfo[0].y, dm_cells = dm_n * dm_n;',
-           '    bool dm_adapt = dm_tinfo[1].z != 0u;',
+           '    bool dm_adapt = dm_tinfo[1].z == 1u;',
            '    uint gl_PrimitiveID, dm_k, dm_e = 0u;',
            '    uint2 dm_cell = uint2(0u);',
            '    if (dm_adapt)',
@@ -342,7 +342,15 @@ def domain(src, spv, mode):
            '    uint2 dm_c = (dm_tinfo[0].w ? dm_qcw[dm_k] : dm_qccw[dm_k]) + dm_cell;',
            '    device const half* dm_lev = (device const half*)((device const uchar*)dm_tbuf + dm_tinfo[1].x) + ulong(gl_PrimitiveID) * 6u;',
            '    bool dm_cull = dm_tcull(dm_lev);',
-           '    float3 gl_TessCoord = float3(dm_adapt ? dm_tvert(dm_e & 4095u, dm_k, dm_lev, float(dm_tinfo[1].w), dm_tinfo[0].w != 0u) : float2(dm_c) / float(dm_n), 0.0);',
+           # dm_tinfo[1].z == 2 (a geometry shader follows, nvn_tess.inc): the grid is the capacity of every patch, and a patch draws its own inside levels' cells of it
+           # (equal spacing: whole segments, rounded up), the rest going where a culled patch's vertices go
+           '    float2 dm_div = float2(float(dm_n));',
+           '    if (dm_tinfo[1].z == 2u && !dm_cull)',
+           '    {',
+           '        uint2 dm_l = uint2(clamp(ceil(float2(float(dm_lev[4]), float(dm_lev[5]))), float2(1.0), float2(float(dm_n))));',
+           '        dm_cull = dm_cell.x >= dm_l.x || dm_cell.y >= dm_l.y; dm_div = float2(dm_l);',
+           '    }',
+           '    float3 gl_TessCoord = float3(dm_adapt ? dm_tvert(dm_e & 4095u, dm_k, dm_lev, float(dm_tinfo[1].w), dm_tinfo[0].w != 0u) : float2(dm_c) / dm_div, 0.0);',
            '    device const float4* dm_cp = dm_tbuf + ulong(gl_PrimitiveID) * dm_ncp * ' + str(CP_SLOTS) + 'u;',
            '    device const float4* dm_pp = dm_tbuf + dm_tinfo[0].z / 16u + ulong(gl_PrimitiveID) * ' + str(PATCH_SLOTS) + 'u;',
            '    main0_patchIn patchIn;',

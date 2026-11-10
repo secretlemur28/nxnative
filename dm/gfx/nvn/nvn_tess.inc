@@ -152,7 +152,8 @@ static void tess_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     if (ps < 1 || ps > 32 || count < ps) { tess_refuse(pr, dw, di, "patch size"); return; }
     uint32_t np1 = (uint32_t)(count / ps), ncp = np1 * (uint32_t)ps, ni = (uint32_t)instances, np = np1 * ni, K = hs->tess_out_cp, N = (uint32_t)tess_level();
     // A geometry shader after the domain: its kernel takes a vertex count the CPU knows (geo_prep sizes its output from it), which the adaptive list's is not, so
-    // every patch is the fixed grid (DM_NVN_TESS_GEO_LEVEL, default 8; DM_NVN_TESS_LEVEL when set)
+    // every patch has the fixed grid's cells (DM_NVN_TESS_GEO_LEVEL, default 8; DM_NVN_TESS_LEVEL when set) and draws those of its own inside levels (dmsh_tess.py domain, dm_tinfo[1].z == 2):
+    // a level above the grid is drawn as the grid
     NvShader *gs = pr->sh[2] && pr->sh[2]->geo_vertices ? pr->sh[2] : nil;
     if (gs && !N) N = (uint32_t)tess_geo_level();
     if (gs && (gs->geo_vertices != 3 || !ds->geo_fn)) { tess_refuse(pr, dw, di, gs->geo_vertices != 3 ? "the geometry shader after the domain does not take triangles" : "the domain shader has no capture entry"); return; }
@@ -195,7 +196,7 @@ static void tess_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     { uint32_t *dst = (uint32_t *)((uint8_t *)b_idx.contents + o_idx);   // instance i's control point = its own record block (the capture writes (instance - base) * span + vertex - first)
       for (uint32_t i = 0; i < ni; i++) for (uint32_t c = 0; c < ncp; c++) dst[(size_t)i * ncp + c] = i * (uint32_t)span + cpi[c]; }
     free(cpi);
-    uint32_t par[16] = {(uint32_t)ps, np, 0, 0, N, K, (uint32_t)patch_off, (uint32_t)ds->tess_cw, (uint32_t)lev_off, (uint32_t)list_off, (uint32_t)adapt, (uint32_t)tess_max(),
+    uint32_t par[16] = {(uint32_t)ps, np, 0, 0, N, K, (uint32_t)patch_off, (uint32_t)ds->tess_cw, (uint32_t)lev_off, (uint32_t)list_off, gs ? 2u : (uint32_t)adapt, (uint32_t)tess_max(),
         0, 1, 0, binst};   // [0..1]: spvIndirectParams; [4..11]: the domain's dm_tinfo[0..1]; [12..15]: the adaptive draw's indirect arguments (vertex count 0, 1 instance)
     memcpy((uint8_t *)b_par.contents + o_par, par, sizeof par);
     id<MTLBuffer> b_ka = nil; size_t o_ka = 0;
