@@ -187,7 +187,7 @@ static void tess_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     g_draw_binst = binst;
     MTL4RenderPassDescriptor *rd = [MTL4RenderPassDescriptor new]; rd.renderTargetWidth = rd.renderTargetHeight = rd.defaultRasterSampleCount = 1;
-    id<MTL4RenderCommandEncoder> re = enc_r_begin(rd); enc_r_pso(re, cap); bind_vbufs(re);
+    id<MTL4RenderCommandEncoder> re = enc_r_begin(rd); enc_r_pso(re, cap); bind_vbufs(re, &vs->rf);
     vconv_bind(re, vs, 1, &range, NULL); args_dirty_all(); encode_args(re, vs, 0, 1); enc_r_vbuf(re, 13, g_cap);
     enc_r_draw_instanced(re, MTLPrimitiveTypePoint, lo, span, ni, binst); enc_r_end(re);
     if (tess_stages() < 2) { g_tess_draws++; return; }
@@ -200,7 +200,7 @@ static void tess_draw(NvProg *pr, const p_draw *dw, const p_draw_idx *di) {
     if (!hs->geo_pso || hs->geo_pso.maxTotalThreadsPerThreadgroup < threads) { tess_refuse(pr, dw, di, "hull pipeline"); return; }
     // the shared compute / copy encoder, as dispatch(): a texture upload or upgrade encode_args needs lands in this same open encoder
     id<MTL4ComputeCommandEncoder> ce = (id<MTL4ComputeCommandEncoder>)dispatch_enc();
-    enc_c_pso(ce, hs->geo_pso); args_dirty_all(); encode_args(ce, hs, 3, 0);
+    enc_c_pso(ce, hs->geo_pso); args_dirty_all(); g_args_hull = 1; encode_args(ce, hs, 3, 0); g_args_hull = 0;
     enc_c_args(ce, g_idx, 24); enc_c_args(ce, g_cap + 512, 25); enc_c_args(ce, g_out + lev_off, 26); enc_c_args(ce, g_out + patch_off, 27); enc_c_args(ce, g_out, 28); enc_c_args(ce, g_par, 29);
     [ce setThreadgroupMemoryLength:((NSUInteger)ps * hs->tess_in_bytes + 15) & ~(NSUInteger)15 atIndex:0];
     enc_c_dispatch(ce, MTLSizeMake(np, 1, 1), MTLSizeMake(threads, 1, 1));
