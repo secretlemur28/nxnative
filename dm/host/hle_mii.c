@@ -7,6 +7,7 @@
 // every field is within CharInfoRaw::Verify's ranges (SDK 4.4.0 sdk+0x1b68c8), so CharInfoAccessor::IsValid accepts it.
 #include "hle.h"
 #include <sys/stat.h>
+#include <math.h>
 
 uint64_t dm_entropy64(void);
 
@@ -124,7 +125,56 @@ HLE_FORCE("_ZNK2nn3mii8Database6ExportEPvm", "mii:u service; nothing to export",
 enum { MII_TEX_SIZE = 0x64 + 0x1c * 327, MII_SHAPE_TABLES = 0x6c + 0x58 * 857 + 0x48 * 132 + 0x24 * 12, MII_MESH_AT = 0x14de0, MII_MESH = 0x20 };
 _Static_assert(MII_TEX_SIZE == 0x2428 && MII_SHAPE_TABLES == 0x14dd4, "MiiModel stand-in layout");
 static const uint8_t mii_mesh_z[] = {0x78, 0x01, 0x01, MII_MESH, 0, (uint8_t)~MII_MESH, 0xff, [7 ... 7 + MII_MESH - 1] = 0, 0x00, MII_MESH, 0x00, 0x01};   // zlib: stored block, Adler-32 of 32 zeros
-enum { MII_SHAPE_SIZE = MII_MESH_AT + sizeof mii_mesh_z };
+// A plain head in place of the facelines (entries 4..15 of the shape table), so a Mii a game shows whole is not a body with nothing on its neck (Mario Golf: Super Rush's Golf
+// Adventure plays as a Mii): an ellipsoid of MII_HEAD_U x MII_HEAD_V quads, positions as 4 halves (attribute 0), normals as signed 10:10:10:2 (attribute 1) and texture coordinates as 2
+// halves (attribute 2), u16 indices, stored as one zlib block. It is no Mii's face: the features come from the texture file, whose parts stay absent.
+// DM_MII_HEAD=cx,cy,cz,rx,ry,rz[,flags] places and sizes it (flags 1: the other winding, 2: positions only); DM_MII_HEAD=0 leaves the facelines empty as before
+enum { MII_HEAD_U = 20, MII_HEAD_V = 14, MII_HEAD_NV = (MII_HEAD_U + 1) * (MII_HEAD_V + 1), MII_HEAD_NI = MII_HEAD_U * MII_HEAD_V * 6,
+       MII_HEAD_RAW = MII_HEAD_NV * 16 + MII_HEAD_NI * 2, MII_HEAD_AT = MII_MESH_AT + 0x40, MII_HEAD_Z = MII_HEAD_RAW + 11 };
+enum { MII_SHAPE_SIZE = MII_HEAD_AT + MII_HEAD_Z };
+static uint16_t mii_half(float f) {   // a float in the range of these meshes as an IEEE half
+    uint32_t x; memcpy(&x, &f, 4); uint32_t s = x >> 16 & 0x8000; int e = (int)(x >> 23 & 0xff) - 112; uint32_t m = x >> 13 & 0x3ff;
+    return e <= 0 ? (uint16_t)s : e >= 31 ? (uint16_t)(s | 0x7bff) : (uint16_t)(s | (uint32_t)e << 10 | m);
+}
+static int mii_head(uint8_t *b) {
+    float v[6] = {0, 27, -2, 33, 37, 32}; int flags = 0;   // sized so that Mario Golf: Super Rush's cap sits on it
+    const char *e = getenv("DM_MII_HEAD");
+    if (e && !strcmp(e, "0")) return 0;
+    if (e) sscanf(e, "%f,%f,%f,%f,%f,%f,%d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &flags);
+    uint8_t *raw = calloc(1, MII_HEAD_RAW); if (!raw) return 0;
+    uint16_t *pos = (uint16_t *)raw, *uv = (uint16_t *)(raw + MII_HEAD_NV * 12), *ix = (uint16_t *)(raw + MII_HEAD_NV * 16); uint32_t *nrm = (uint32_t *)(raw + MII_HEAD_NV * 8);
+    int k = 0;
+    for (int j = 0; j <= MII_HEAD_V; j++) for (int i = 0; i <= MII_HEAD_U; i++, k++) {
+        float a = (float)i / MII_HEAD_U * 6.2831853f, t = (float)j / MII_HEAD_V * 3.14159265f;
+        float nx = sinf(t) * sinf(a), ny = cosf(t), nz = sinf(t) * cosf(a);   // a = 0 faces +z, the front
+        pos[k * 4] = mii_half(v[0] + v[3] * nx); pos[k * 4 + 1] = mii_half(v[1] + v[4] * ny); pos[k * 4 + 2] = mii_half(v[2] + v[5] * nz); pos[k * 4 + 3] = mii_half(1.0f);
+        nrm[k] = ((uint32_t)lroundf(nx * 511) & 0x3ff) | ((uint32_t)lroundf(ny * 511) & 0x3ff) << 10 | ((uint32_t)lroundf(nz * 511) & 0x3ff) << 20;
+        uv[k * 2] = mii_half(0.5f + 0.5f * nx); uv[k * 2 + 1] = mii_half(0.5f - 0.5f * ny);
+    }
+    k = 0;
+    for (int j = 0; j < MII_HEAD_V; j++) for (int i = 0; i < MII_HEAD_U; i++) {
+        uint16_t p0 = (uint16_t)(j * (MII_HEAD_U + 1) + i), p1 = p0 + 1, p2 = p0 + MII_HEAD_U + 1, p3 = p2 + 1;
+        uint16_t q[6] = {p0, p2, p1, p1, p2, p3};
+        for (int n = 0; n < 6; n++) ix[k++] = q[flags & 1 ? 5 - n : n];
+    }
+    uint8_t *z = b + MII_HEAD_AT; uint32_t s1 = 1, s2 = 0;   // zlib: one stored block and its Adler-32
+    z[0] = 0x78; z[1] = 0x01; z[2] = 0x01; z[3] = MII_HEAD_RAW & 0xff; z[4] = MII_HEAD_RAW >> 8; z[5] = (uint8_t)~z[3]; z[6] = (uint8_t)~z[4];
+    memcpy(z + 7, raw, MII_HEAD_RAW);
+    for (int i = 0; i < MII_HEAD_RAW; i++) { s1 = (s1 + raw[i]) % 65521; s2 = (s2 + s1) % 65521; }
+    z[7 + MII_HEAD_RAW] = (uint8_t)(s2 >> 8); z[8 + MII_HEAD_RAW] = (uint8_t)s2; z[9 + MII_HEAD_RAW] = (uint8_t)(s1 >> 8); z[10 + MII_HEAD_RAW] = (uint8_t)s1;
+    free(raw);
+    for (int i = 4; i < 16; i++) {   // the 12 facelines
+        uint32_t *t = (uint32_t *)(b + 0x6c + 0x58 * i); memset(t, 0, 0x58);
+        t[0] = MII_HEAD_AT; t[1] = MII_HEAD_RAW; t[2] = MII_HEAD_Z;
+        t[4] = 0; t[9] = MII_HEAD_NV * 8;
+        if (!(flags & 2)) { t[5] = MII_HEAD_NV * 8; t[10] = MII_HEAD_NV * 4; t[6] = MII_HEAD_NV * 12; t[11] = MII_HEAD_NV * 4; }
+        t[14] = MII_HEAD_NV * 16; t[15] = MII_HEAD_NI * 2;
+        float box[6] = {v[0] - v[3], v[1] - v[4], v[2] - v[5], v[0] + v[3], v[1] + v[4], v[2] + v[5]}; memcpy(t + 16, box, sizeof box);
+    }
+    uint32_t largest = (MII_HEAD_RAW + 0xfff) & ~0xfffu; memcpy(b + 0xc + 4 * 1, &largest, 4);   // the faceline kind's largest inflated size
+    LOG("mii: the stand-in's facelines are a plain head (centre %g %g %g, radii %g %g %g, flags %d): no Mii's own face", v[0], v[1], v[2], v[3], v[4], v[5], flags);
+    return 1;
+}
 static void mii_shapes(uint8_t *b) {
     for (int i = 0; i < 857; i++) {
         uint32_t *e = (uint32_t *)(b + 0x6c + 0x58 * i);
@@ -133,6 +183,7 @@ static void mii_shapes(uint8_t *b) {
         e[14] = 0x10; e[15] = 6;                                         // index offset and size: three u16 indices
     }
     memcpy(b + MII_MESH_AT, mii_mesh_z, sizeof mii_mesh_z);
+    mii_head(b);
 }
 static int mii_write(const char *dir, const char *name, int parts, size_t size) {
     char p[1280]; snprintf(p, sizeof p, "%s/%s", dir, name);
