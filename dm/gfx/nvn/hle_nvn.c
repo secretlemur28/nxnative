@@ -310,6 +310,12 @@ NVN(nvnTexturePoolInitialize, NVNboolean, NVNtexturePool *tp, const NVNmemoryPoo
 }
 NVN(nvnTexturePoolFinalize, void, NVNtexturePool *tp) { (void)tp; }
 NVN(nvnTexturePoolRegisterTexture, void, const NVNtexturePool *tp, int id, const NVNtexture *t, const NVNtextureView *v) {
+    // DM_NVN_TREG_ID (any value) also logs the first registrations of no texture, with the game's call stack: an ID the replay later reports as not registered (tex_by_id) may be one the
+    // game itself emptied or filled from an object that has no texture (Mario Golf: Super Rush registers the hat and nose line views of a Mii whose model data has none)
+    if (!t && getenv("DM_NVN_TREG_ID")) { static int n; if (n++ < 12) { module_t *m = module_of(__builtin_return_address(0));
+        LOG("[nvn] TREG RegisterTexture id %d with no texture, view %p (from %s+%#llx)", id, (void *)v, m ? m->name : "?", m ? (unsigned long long)((uint64_t)__builtin_return_address(0) - (uint64_t)m->base) : 0ULL);
+        uint64_t *fp = (uint64_t *)__builtin_frame_address(0); fp = (uint64_t *)fp[0];
+        for (int k = 0; k < 10 && fp && ((uintptr_t)fp & 7) == 0; k++) { module_t *q = module_of((void *)fp[1]); LOG("[nvn] TREG   frame %d: %s+%#llx", k, q ? q->name : "?", q ? (unsigned long long)(fp[1] - (uint64_t)q->base) : (unsigned long long)fp[1]); if (!q) break; fp = (uint64_t *)fp[0]; } } }
     mtl_reg_tex(dpool_base(g_tpb, g_ntpb, tp) + id, (const tex_t *)t, (const view_t *)v);
 }
 // Image descriptors live in the same pool index space as texture descriptors, and image handles are pool indices (nvnDeviceGetImageHandle; BindImages below), so an image
